@@ -1,0 +1,725 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 08:52:12 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 797 $
+#
+# Usage: lab_ks.sh vm-name kickstart-file [[ram-size-in-Mb] [disk-size-in-Gb]]
+# $1 kickstart file name
+#
+# This script makes it easier to reuse kickstart files created by anaconda
+# after a 'manual' install.
+#
+# A requirement is: mounting the DVD ISO in a sub dir of /var/www/html
+# for example /var/www/html/RH61 for rhel 6.1 DVD
+#
+# Running this script is like running 'virt-install' but only the required
+# questions.
+#
+# After a system is build, the /root/anaconda-ks.cfg file can be placed in the
+# /var/www/html/ks-files directory. The script is able to reuse the kickstart
+# file.
+#
+# By adding
+#
+# #RAM_SIZE=1024
+# #DISK_SIZE=10
+#
+# The script will pick that up from the kickstart file
+# 
+# By installing the lab_ks.cgi script, the hostname will be passed to the VM,
+# the hashed out partitioning commands will be enabled, clearpart will be
+# forced and the .post file will be added as %post
+#
+# Option(s):
+# 
+# --extra-args "arg1 arg.."  Will add "arg1 arg.." to --extra-args ks=.. arg1
+#                            Adding #EXTRA_ARGS="arg1 arg.." in the kickstart
+#                            file will add the args from the kickstart
+# --serial-console           Will install and run the VM with a serial console
+#                            Adding #SERIAL_CONSOLE=yes in the kickstart file 
+#                            will also install and with a serial console.
+#                            #SERIAL_CONSOLE=background will install with
+#                            serial console, but in the background.
+# --bg | --background        Will run the installation in the background
+# --force                    Will pass --force to virt-install
+# --network-name             Will be passed an also be used to determine the
+#                            ip address for the gateway
+# --network-mode             Can be used to make a generic instruction.
+#                            values can be: isolated nat route
+#                            the script will take the network in the requested
+#                            mode and use the found network name.
+# --disk-bus bustype         Bustypes are ide, sata, scsi and virtio
+# --disk-bus-keep-ks-dev     This option will NOT replace the =vdX defs from
+#                            the kickstart-file. By default, this is replaced.
+# --extra-disk size[,size..] Will add extra disks (vdb, vdc ..) in qcow2
+#                            format. The size is in G or T. More sizes will
+#                            add more disks (separated by commas).
+#                            Adding #EXTRA_DISK=10,20 to the kickstart file,
+#                            will add 2 extra disks of 10G (vdb) and 20G (vdc) 
+# --selinux MODE             Will overrule the value in the kickstart and
+#                            replace it with MODE. MODE can be:
+#
+#                              disabled
+#                              permissive
+#                              enforcing
+#
+# --auto-ks-post VALUE       Will replace or insert a new #AUTO_KS_POST into
+#                            kickstart file. Interesting values:
+#
+#                              no|off|disabled    No .post processing
+#                              host               only .post/.<hostname>
+#                              egrep:<regexpr>    <regexpr> of files in .post/
+#                              -no-value-         All .post/ files
+#
+
+
+# Help text
+_help_show_args="[VmName] [Kickstart] [[RamMb] [DiskGb]]"
+
+# Automatic --option-processor to var __option_processor=yes
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+ToUrlHex()
+{
+   local Hex
+
+   for Hex in `echo -n $* | od -A n -t x1 -v`
+   do
+      printf "%%%s" "$Hex"
+   done | tr '[[:lower:]]' '[[:upper:]]'
+}
+
+## Shared code
+SetUser()
+{
+   # Set (non-root) user where we are running from (in 'User' en 'Home' var)
+   Pid=$$
+   Uid=$UID
+   User=$USER
+   while [ "$Pid" != "" ] && [ $Pid -gt 1 ] && [ $Uid -eq 0 ]
+   do
+      Uid="$(awk '/^Uid:/{print $2}' /proc/$Pid/status 2> /dev/null)"
+      User="$(awk -F: '/^[^:]*:[^:]*:'$Uid:'/{print $1}' /etc/passwd \
+                  2> /dev/null)"
+      Home="$(awk -F: '/^[^:]*:[^:]*:'$Uid:'/{print $6}' /etc/passwd \
+                  2> /dev/null)"
+      Pid=$(awk '/^PPid:/{print $2}' /proc/$Pid/status 2> /dev/null)
+   done
+}
+
+WebMounts() # $1 = "umount" -> umount
+{
+   local IsoDir
+
+   if [ ${#ISO_DIR} -gt 0 ]
+   then
+      IsoDir="$ISO_DIR"
+   else
+      IsoDir="/var/share/ISO"
+   fi
+
+   if [ ${#IsoDir} -gt 0 ] && [ -d $IsoDir ]
+   then
+      ls $IsoDir | grep '[.]iso$' | \
+      while read IsoFile
+      do
+         MountPoint="$(awk -F: "/:$IsoFile\$/"'{print $1}' \
+                       <<< "$NotAutoWebMounts")"
+         if [ ${#MountPoint} -eq 0 ]
+         then
+            ManuFact="$(awk -F - '{print $1}' <<< "$IsoFile")"
+            MF="$(sed 's/[a-z]//g' <<< "$ManuFact")$(sed 's/[A-Z]//g' \
+                  <<< "$ManuFact" | tr '[[:lower:]]' '[[:upper:]]')"
+            MF="${MF:0:2}"
+            VR="$(sed 's/^[^1-9]*\([1-9][0-9]*\)[.-]U\?\([0-9]\+\).*/\1\2/' \
+                      <<< "$IsoFile")"
+            if [ ${#MF} -eq 2 ] && [ ${#VR} -ge 2 ]
+            then
+               MountPoint="$MF$VR"
+            fi
+         fi
+         if [ ${#MountPoint} -gt 0 ]
+         then
+            if [ ! -d /var/www/html/$MountPoint ]
+            then
+               echo "# Creating /var/www/html/$MountPoint"
+               mkdir -p /var/www/html/$MountPoint
+            fi
+
+            if [ ! -d /var/www/html/$MountPoint/images ]
+            then
+               echo "# Mounting $IsoFile on /var/www/html/$MountPoint"
+               mount -o loop,ro $IsoDir/$IsoFile /var/www/html/$MountPoint/
+            elif [ "$1" = "umount" ]
+            then
+               echo "# Un-Mounting $IsoFile from /var/www/html/$MountPoint"
+               umount /var/www/html/$MountPoint/
+            fi
+         fi
+      done
+   fi
+}
+## End
+
+# Source in:
+#
+#  /etc/lab_ks
+#  $(dirname $0)/.lab_ks
+#  $HOME/.lab_ks (run-user)
+
+# Find runuser's home
+SetUser
+
+if [ "$___no_insource" != "yes" ]
+then
+   for InSource in /etc/lab_ks $(dirname $0)/.lab_ks $Home/.lab_ks
+   do
+      if [ -f $InSource ]
+      then
+         . $InSource
+      fi
+   done
+fi
+
+# Update WebMounts
+WebMounts
+
+# if (version < 0.500) then use legacy options 
+eval `rpm -q python-virtinst 2> /dev/null | \
+      sed 's/.*[-]\([^-]*\)[-][^-]*$/\1/' | \
+      awk -F. '
+      {
+         if (($1==0)&&($2<500))
+         {
+            print "__LEGACY_OPTIONS=\"--accelerate --os-variant=virtio26\"";
+         }
+      }'`
+
+
+# Retrieve the networks
+# get the xmldump for each net-name, filter the mode, bridge and address
+unset Networks
+Networks="$(
+for NetName in `virsh net-list | awk '{if ($2=="active") {print $1}}'`
+do
+   virsh net-dumpxml $NetName
+done | \
+egrep '<network[^>]*[>]|<name>|<forward mode=|<bridge name=|<domain name=|<ip address=' | \
+sed -e 's/^<network[^>]*[>]/#/' \
+    -e 's,<name>,,' \
+    -e "s,</name>, forward_mode='isolated'," \
+    -e 's/[[:space:]]*<\([a-z]*\)[[:space:]]*/\1_/' \
+    -e 's,/*>[[:space:]]*$,,' \
+    -e 's,^[[:space:]]*,,' | \
+tr '\n #' ';;\n' | \
+sed -e 's/^;//' -e 's/;$//' -e 's/;;*/;/g' \
+    -e "s/;forward_mode='isolated';forward_mode=/;forward_mode=/" | \
+grep -v '^$')"
+
+#
+# output network-name;var=val[;var2=val2]
+#
+# default
+# forward_mode='nat'          # Forward mode (nat isolated)
+# bridge_name='virbr0'        # Bridge insterface name
+# stp='on'                    # ?
+# delay='0'                   # ?
+# ip_address='192.168.122.1'  # Network (host) ip
+# netmask='255.255.255.0'     # Network netmask
+#
+# isolated
+# forward_mode='isolated'
+# bridge_name='virbr1'
+# stp='on'
+# delay='0'
+# domain_name='local.iso'
+# ip_address='192.168.100.1'
+# netmask='255.255.255.0'
+
+
+# Find the provide network name, network mode, default or try 192.168.122.1
+unset Network
+if [ "$__network_name" = "yes" ]
+then
+   Network=`echo "$Networks" | grep "^$__network_name_ARG;"`
+   if [ "$Network" = "" ]
+   then
+      echo "Error: no network $__network_name_ARG available"
+      exit 1
+   fi   
+elif [ "$__network_domain" = "yes" ]
+then
+   NetworksFound=`echo "$Networks" | \
+                  grep -F "domain_name='$__network_domain_ARG'" | \
+                  wc -l`
+   if [ $NetworksFound -eq 0 ]
+   then
+      echo "Error: no network domain $__network_domain_ARG available"
+      exit 1
+   elif [ $NetworksFound -eq 1 ]
+   then
+      Network=`echo "$Networks" | \
+               grep -F "domain_name='$__network_domain_ARG'"`
+   else
+      echo "Error: $NetworksFound network domains $__network_domain_ARG found" \
+           "use --network-name"
+      exit 1
+   fi
+elif [ "$__network_mode" = "yes" ]
+then
+   NetworksFound=`echo "$Networks" | \
+                  grep -F "forward_mode='$__network_mode_ARG'" | \
+                  wc -l`
+   if [ $NetworksFound -eq 0 ]
+   then
+      echo "Error: no network in $__network_mode_ARG mode"
+      exit 1
+   elif [ $NetworksFound -eq 1 ]
+   then
+      Network=`echo "$Networks" | \
+               grep -F "forward_mode='$__network_mode_ARG'"`
+   else
+      echo "Error: $NetworksFound networks in $__network_mode_ARG mode" \
+           "use --network-name or --network-domain"
+      exit 1
+   fi
+fi
+
+if [ "$Network" != "" ]
+then
+   # Set all found values
+   eval `echo $Network | sed 's/^[^;]*;//'`
+   __NETWORK="--network network=$(echo $Network | sed 's/;.*//')"
+else
+   Network=`echo "$Networks" | grep '^default;'`
+   if [ "$Network" != "" ]
+   then
+      # Set all found values
+      eval `echo $Network | sed 's/^[^;]*;//'`
+   else
+      # Try with 192.168.122.1 anyway
+      ip_address=192.168.122.1
+   fi
+fi
+
+if [ "$___debug_network" = "yes" ]
+then
+   echo "__network_name       $__network_name"
+   echo "__network_name_ARG   $__network_name_ARG"
+   echo "__network_mode       $__network_mode"
+   echo "__network_mode_ARG   $__network_mode_ARG"
+   echo "__network_domain     $__network_domain"
+   echo "__network_domain_ARG $__network_domain_ARG"
+   echo "Network              $Network"
+   echo "ip_address           $ip_address"
+   echo "__NETWORK            $__NETWORK"
+fi
+
+KsFilesUrl=http://$ip_address/ks-files
+KsFilesCgi=http://$ip_address/cgi-bin/lab_ks.cgi
+ImageDir=/var/lib/libvirt/images
+
+if [ "$1" != "" ]
+then
+   VmName=$1
+else
+   read -p "Enter the VM hostname:" VmName
+   if [ "$VmName" = "" ]
+   then
+      echo "Error: No VM hostname entered"
+      exit 1
+   fi
+fi
+
+if virsh list --all --name | grep -q "^$VmName\$"
+then
+   echo "Error: Guest name '$VmName' is already in use." >&2
+   exit 1
+fi
+
+if [ "$2" != "" ]
+then
+   KsFile=$2
+else
+   echo
+   echo "   Available kickstart files:"
+   echo
+   wget -t 1 --connect-timeout=1 -qO - $KsFilesUrl | \
+   sed -e 's/.*href=//g' -e 's/<.*//' -e 's,>,,' -e 's/\"/ /g' | \
+   awk '{print $1}' | egrep -v '^$|[?=;/]' | sort | sed 's/^/   /'
+   echo
+   read -p "Enter a kickstart file name, or press Enter for none:" KsFile
+fi
+
+if [ -f $ImageDir/$VmName ]
+then
+   echo "Error: Disk image $ImageDir/$VmName already exists"
+   exit 1
+fi
+
+if [ "$KsFile" != "" ]
+then
+   wget -t 1 --connect-timeout=1 -qO - $KsFilesUrl/$KsFile &> /dev/null
+   RET=$?
+   if [ $RET -eq 4 ]
+   then
+      echo "Error: kickstart file $KsFile not found (web server down??)"
+      exit 1
+   elif [ $RET -ne 0 ]
+   then
+      echo "Error: kickstart file $KsFile not found"
+      exit 1
+   fi
+fi
+
+
+if [ "$KsFile" != "" ]
+then
+   eval $(wget -qO - $KsFilesUrl/$KsFile 2> /dev/null | \
+          egrep '^#[_A-Z][_A-Z]*=|^url .*--url[= ]|^#version=' | \
+          grep -v '^#AUTO_KS_POST=' | \
+          sed -e 's/^#//' \
+              -e 's/^url .*--url[= ]/KsUrl=/' \
+              -e "s,http://[0-9.]*/,http://$ip_address/,g")
+
+   # Auto detect anaconda's ks= vs ks.inst= versions, assuming all kickstarts
+   # files with a non DEVEL version run the anaconda with ks.inst=
+   if [ "$version" != "DEVEL" ]
+   then
+      InstKs="inst.ks"
+   else
+      InstKs="ks"
+   fi
+   # To control new and old anaconda kickstarts in case auto detect
+   # does NOT work:
+   # ANACONDA_INST=yes -> inst.ks=
+   # ANACONDA_INST=no  -> ks=
+   if echo $ANACONDA_INST | grep -qi '^y'
+   then
+      InstKs="inst.ks"
+   elif echo $ANACONDA_INST | grep -qi '^n'
+   then
+      InstKs="ks"
+   fi
+
+   # Add kickstart URL
+   if wget -t 1 --connect-timeout=1 -qO - $KsFilesCgi &> /dev/null
+   then
+      __EXTRA_ARGS="$InstKs=$KsFilesCgi?$KsFile%20$VmName"
+   else
+      echo "WARNING: $KsFilesCgi unavailable,"
+      echo "         using unmodified kickstart file"
+      __EXTRA_ARGS="$InstKs=$KsFilesUrl/$KsFile"
+   fi
+fi
+
+# General disk options
+DiskOpts="format=qcow2"
+
+# Var to define the device name
+Xd='vd'
+
+if [ "$DISK_BUS" != "" ]
+then
+   __disk_bus_ARG="$DISK_BUS"
+fi
+
+if [ "$DISK_BUS_KEEP_KS_DEV" != "" ]
+then
+   __disk_bus_keep_ks_dev="$DISK_BUS_KEEP_KS_DEV"
+fi
+
+if echo "$__disk_bus_ARG" | egrep -q '^ide$|^sata$|^scsi$|^virtio$'
+then
+   DiskOpts="bus=$__disk_bus_ARG,$DiskOpts"
+   if [ "$__disk_bus_ARG" = "virtio" ]
+   then
+      Xd="vd"
+   else
+      Xd="sd"
+   fi
+   if [ "$__disk_bus_keep_ks_dev" = "" ] && \
+      echo "$__EXTRA_ARGS" | grep -q "%20$VmName"
+   then
+      __EXTRA_ARGS="${__EXTRA_ARGS}%20dev=${Xd}"
+   fi
+fi
+
+if echo "$__selinux_ARG" | egrep -q '^disabled$|^permissive$|^enforcing$'
+then
+   __EXTRA_ARGS="${__EXTRA_ARGS}%20se=${__selinux_ARG:0:1}"
+fi
+
+# Overwrite EXTRA_DISK from kickstart
+if [ "$__extra_disk" = "yes" ]
+then
+   EXTRA_DISK="$__extra_disk_ARG"
+fi
+
+# Setup a Disk[] array of extra disks
+unset Disk
+if [ "$EXTRA_DISK" != "" ]
+then
+   i=0
+   for Size in `eval echo $(echo "$EXTRA_DISK" | \
+                            sed -e 's/[,;:/gG]/ /g' \
+                                -e 's/\([0-9][0-9]*\)[Tt]/$((\1*1024))/g')`
+   do
+      Dev=`echo $i | awk '{printf("${Xd}%c",$1+98);}'`
+      Disk[$i]="--disk $DiskOpts,path=$ImageDir/$VmName.$Dev.qcow2,size=$Size"
+      i=$(($i+1))
+   done
+fi
+
+# Disable lab_ks post log
+if [ "$__no_post_log" = "yes" ] && \
+   echo "$__EXTRA_ARGS" | grep -q "%20$VmName"
+then
+   __EXTRA_ARGS="${__EXTRA_ARGS}%20no_post_log"
+fi
+
+# Add the variable from the kickstart file
+if [ "$EXTRA_ARGS" != "" ]
+then
+   __EXTRA_ARGS="$__EXTRA_ARGS $EXTRA_ARGS"
+fi
+
+# Add the passed option
+if [ "$__extra_args_ARG" != "" ]
+then
+   __EXTRA_ARGS="$__EXTRA_ARGS $__extra_args_ARG"
+fi
+
+if [ "$3" != "" ]
+then
+   RAM_SIZE=$3
+   if [ "$ISO_RAM" != "" ]
+   then
+      ISO_RAM=$RAM_SIZE
+   fi
+fi
+
+if [ "$RAM_SIZE" = "" ]
+then
+   read -p "Enter RAM size in Mb:" RAM_SIZE
+   if [ "$RAM_SIZE" = "" ]
+   then
+      echo "Error: RAM size not provided"
+      exit 1
+   elif [ "$ISO_RAM" != "" ]
+   then
+      ISO_RAM=$RAM_SIZE
+   fi
+fi
+
+if [ "$4" != "" ]
+then
+   DISK_SIZE=$4
+fi
+
+if [ "$DISK_SIZE" = "" ]
+then
+   read -p "Enter DISK size in Gb:" DISK_SIZE
+   if [ "$DISK_SIZE" = "" ]
+   then
+      echo "Error: DISK size not provided"
+      exit 1
+   fi
+fi
+
+if [ "$KsUrl" = "" ]
+then
+   read -p "Enter kickstart URL:" KsUrl
+   if [ "$KsUrl" = "" ]
+   then
+      echo "Error: kickstart URL not provided"
+      exit 1
+   fi
+   Location=$KsUrl
+fi
+
+# Remove " and trailing /
+KsUrl=$(echo $KsUrl | sed 's,/*$,,')
+Location=$KsUrl
+
+if [ "$Location" = "" ]
+then
+   echo "Error: no http source location found in the kickstart file"
+   exit 1
+fi
+
+if [ "$__no_local_iso" != "yes" ] && [ "$ISO_MNT" != "" ]
+then
+   # Get the DocumentRoot
+   eval $(awk '/^DocumentRoot[[:space:]]/{print $1 "=" $2}' \
+              /etc/httpd/conf/httpd.conf 2> /dev/null)
+   # Convert to mount point
+   MountPoint=$(echo $KsUrl | sed 's,^http://[0-9.]*//*,,')
+   if [ "$DocumentRoot" != "" ] && [ "$MountPoint" != "" ] && \
+      [ -d $DocumentRoot/$MountPoint ]
+   then
+      Iso=$(mount | \
+            awk -v m=$DocumentRoot/$MountPoint '
+            {
+               if (($3==m)&&($5=="iso9660"))
+               {
+                  print $1
+               }
+            }')
+      if [ "$Iso" != "" ] && [ -f $Iso ]
+      then
+         Location=$Iso
+         CdRom=('--cdrom' $Iso)
+         # Pass the iso flag to the cgi
+         if echo "$__EXTRA_ARGS" | grep -q "%20$VmName"
+         then
+            __EXTRA_ARGS="${__EXTRA_ARGS}%20iso"
+         fi
+         # Specific RAM size required
+         if [ "$ISO_RAM" != "" ]
+         then
+            RAM_SIZE=$ISO_RAM
+         fi
+      else
+         unset Iso
+      fi
+   fi
+   if [ "$Iso" = "" ]
+   then
+      echo "Error: Unable to determine iso file from $KsUrl (mounted?)"
+      exit 1
+   fi
+fi
+
+# Check for media available
+wget -qO - $KsUrl/images/ &> /dev/null
+RET=$?
+if [ $RET -ne 0 ]
+then
+   echo
+   echo "Error: $KsUrl/images/ not available!"
+   echo
+   if [ $RET -eq 4 ]
+   then
+      echo " o Web server down?"
+   fi
+   echo " o Wrong URL provided?"
+   echo " o Media not mounted?" \
+        "(/var/www/html`echo $KsUrl|sed 's,[^/]*//[^/]*,,'`)"
+   echo
+   exit 1
+fi
+
+# Check for serial console by the ks file
+if echo "$SERIAL_CONSOLE" | egrep -q '^background$|^yes$'
+then
+   __serial_console="$SERIAL_CONSOLE"
+fi
+
+# Check for serial console option
+unset __NOGRAPICS __NOAUTOCONSOLE BG
+if [ "$__serial_console" = "" ]
+then
+   # core business, starting in the background
+   echo "Starting virt-install in the background," \
+        "waiting until '$VmName' runs.."
+   BG='&'
+else
+   # serial
+   echo "Using serial console"
+   __NOGRAPICS="--nographics"
+
+   # Get the hypervisor information
+   if virsh uri | grep '^qemu:' &> /dev/null
+   then
+      __EXTRA_ARGS="console=ttyS0 $__EXTRA_ARGS"
+   else
+      __EXTRA_ARGS="console=xvc0 $__EXTRA_ARGS"
+   fi
+fi
+
+if [ "$__serial_console" = "background" ] || [ "$__bg" = "yes" ]
+then
+   __NOAUTOCONSOLE="--noautoconsole"
+   BG='&'
+fi
+
+unset __FORCE
+if [ "$__force" = "yes" ]
+then
+   __FORCE="--force"
+fi
+
+# Check for serial console by the ks file
+if [ "$VCPUS" != "" ]
+then
+   __vcpus_ARG="$VCPUS"
+fi
+
+if echo $__vcpus_ARG | grep -q '^[1-9][0-9]*$'
+then
+   __VCPUS=('--vcpus' "$__vcpus_ARG")
+fi
+
+if [ "$__auto_ks_post" = "yes" ]
+then
+   if [ "$__EXTRA_ARGS" != "" ]
+   then
+      __EXTRA_ARGS="${__EXTRA_ARGS}%20"
+   fi
+   __EXTRA_ARGS="${__EXTRA_ARGS}auto_ks_post=$(ToUrlHex "$__auto_ks_post_ARG")"
+fi
+
+# Adding the option and the quotes in case of extra args
+if [ "$__EXTRA_ARGS" != "" ]
+then
+   __EXTRA_ARGS="--extra-args \"$__EXTRA_ARGS\""
+fi
+
+if [ "$___dry_run" = "yes" ]
+then
+   Run=('echo' '#')
+else
+   Run='eval'
+fi
+
+if [ "$__osinfo_ARG" != "" ]
+then
+   OsInfo=('--osinfo' $__osinfo_ARG)
+else
+   unset OsInfo
+fi
+
+${Run[@]} virt-install ${OsInfo[@]} \
+        $__FORCE $__LEGACY_OPTIONS $__NETWORK ${__VCPUS[@]} \
+        --name $VmName --ram $RAM_SIZE \
+        --disk $DiskOpts,path=$ImageDir/$VmName.${Xd}a.qcow2,size=$DISK_SIZE \
+        ${Disk[@]} \
+        ${CdRom[@]} --location $Location \
+        $__EXTRA_ARGS $__NOGRAPICS $__NOAUTOCONSOLE $BG
+
+# No wait and sleep if we run in serial console mode
+if [ "$BG" != "" ]
+then
+   # To let virt-install finish the output.
+   TimeOut=18
+   while [ "`virsh domstate $VmName 2> /dev/null`" != "running" ] && \
+         [ $TimeOut -ne 0 ]
+   do
+      sleep 1
+      TimeOut=`expr $TimeOut - 1`
+   done
+   # Let the ouput stabilize
+   sleep 2
+fi

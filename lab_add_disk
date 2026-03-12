@@ -1,0 +1,97 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+# Helper script to add an extra disk (or disks) to an existing (k)vm
+# in qcow2 format.
+#
+
+if [ "$2" = "" ]
+then
+   echo
+   echo "Usage: `basename $0` kvm-name disk-size [disk-size] .."
+   echo
+   exit 1
+fi
+
+AddDisk()
+{
+   if ! virsh list --name --all | grep -v '^$' | grep -q "^$1\$"
+   then
+      echo "! VM $1 does not exist"
+      return 1
+   fi
+
+   RootDisk="`virsh domblklist $1 2> /dev/null | \
+              grep '^[[:space:]]' | sed 's/^[[:space:]]*//' | \
+              grep '^[sv]d[a-z][a-z]*[[:space:]][[:space:]]*' | \
+              sort | head -1`"
+   RootDiskDev=`echo "$RootDisk" | awk '{print $1}'`
+   SystemImage=`echo "$RootDisk" | awk '{print $2}' | \
+                sed "s|[.]$RootDiskDev.*||"`
+   if [ "$SystemImage" = "" ]
+   then
+      echo "! Unable to determine system's disk image"
+      return 1
+   fi
+
+   LastDiskDev="`virsh domblklist $1 2> /dev/null | \
+                 grep '^[[:space:]]' | sed 's/^[[:space:]]*//' | \
+                 grep '^[sv]d[a-z][a-z]*[[:space:]][[:space:]]*' | \
+                 sort | tail -1  | \
+                 sed 's,^\([sv]d[a-z][a-z]*\)[[:space:]].*,\1,'`"
+
+   NewDiskDev="${LastDiskDev:0:2}`\
+               echo ${LastDiskDev:2:1} | \
+               awk '
+               {
+                  printf("%c\n",index("abcdefghijklmnopqrstuvwxyz",$1)+97);
+               }'`"
+   # Clean up on overflow
+   NewDiskDev="`echo $NewDiskDev | grep '^[sv]d[a-z]$'`"
+
+   if [ "$NewDiskDev" = "" ]
+   then
+      echo "! Unable to determine new disk devicename"
+      return 1
+   fi
+
+   if [ -f $SystemImage.$NewDiskDev.qcow2 ]
+   then
+      echo "! Disk image file still exists, disk not added"
+      return 1
+   fi
+
+   Size=$(echo $2 | sed 's/[0-9]$/\0G/')
+   echo "# Creating disk image $SystemImage.$NewDiskDev.qcow2 ($Size)"
+   qemu-img create -f qcow2 $SystemImage.$NewDiskDev.qcow2 $Size
+   if [ $? -ne 0 ]
+   then
+      echo "! Creation of disk image $SystemImage.$NewDiskDev.qcow2 failed"
+      return 1
+   fi
+
+   echo "# Attaching disk image $SystemImage.$NewDiskDev.qcow2 to" \
+        "$1 as $NewDiskDev"
+   virsh attach-disk $1 $SystemImage.$NewDiskDev.qcow2 \
+                        $NewDiskDev \
+                        --subdriver qcow2 --persistent
+   if [ $? -ne 0 ]
+   then
+      echo "! Failed to attach disk image $SystemImage.$NewDiskDev.qcow2" \
+           "to $1"
+      return 1
+   fi
+}
+
+Kvm=$1
+shift
+while [ "$1" != "" ] && AddDisk $Kvm $1
+do
+   shift
+done

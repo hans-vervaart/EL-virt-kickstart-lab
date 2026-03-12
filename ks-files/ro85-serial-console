@@ -1,0 +1,52 @@
+#RAM_SIZE=2048
+#DISK_SIZE=20
+#SERIAL_CONSOLE=yes
+#
+#reboot
+#
+
+# Accept the End User License Agreement (EULA)
+eula --agreed
+
+#version=RHEL8
+ignoredisk --only-use=vda
+autopart --type=lvm
+# Partition clearing information
+clearpart --none --initlabel
+# Use text install
+text
+# Use network installation
+url --url="http://192.168.122.1/RO85"
+# Keyboard layouts
+keyboard --vckeymap=us --xlayouts='us'
+# System language
+lang en_US.UTF-8
+
+# Network information
+network  --bootproto=dhcp --device=enp1s0 --hostname=test --ipv6=auto --activate
+# Root password
+rootpw RockyLinux
+# Skip the Setup Agent on first boot
+firstboot --disable
+# Do not configure the X Window System
+skipx
+# System services
+services --enabled="chronyd"
+# System timezone
+timezone Europe/Amsterdam --isUtc
+
+%packages
+@^server-product-environment
+kexec-tools
+
+%end
+
+%addon com_redhat_kdump --enable --reserve-mb='auto'
+
+%end
+
+%anaconda
+pwpolicy root --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+pwpolicy user --minlen=6 --minquality=1 --notstrict --nochanges --emptyok
+pwpolicy luks --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+%end

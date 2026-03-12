@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+
+# Help text
+_help_show_args="KVMNAME NETWORK"
+
+# Automatic --option-processor to var __option_processor=yes
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+if ! virsh list --all --name 2> /dev/null | grep -q "^$1\$"
+then
+   echo "# KVM $1 not available"
+   exit 1
+else
+   Kvm=$1
+fi
+
+Type=Subnet
+if [ "$__network_domain" = "yes" ]
+then
+   Type=Domain
+   NetName="$( virsh net-list --name 2> /dev/null | grep -v '^$' | \
+               while read N
+               do
+                  if virsh net-dumpxml $N | grep -q "<domain name='$2'/>"
+                  then
+                     echo "$N"
+                  fi
+               done | head -1)"
+elif virsh net-list --name | grep -q "^$2\$"
+then
+   NetName=$2
+fi
+
+if [ "$NetName" = "" ]
+then
+   echo "# $Type $2 not found"
+   exit 1
+fi
+
+if virsh domiflist --inactive $Kvm | \
+   awk '{if($2=="network"){print $3}}' | \
+   grep -q "^$NetName\$"
+then
+   echo "# Subnet $NetName already connected to $Kvm"
+   exit 0
+else
+   echo "# Add $NetName to $Kvm"
+   unset Live
+   if virsh list --name | grep -q "^$Kvm\$"
+   then
+      Live='--live'
+   fi
+   virsh attach-interface --domain $Kvm --type network --source $NetName \
+                          --model virtio --config $Live
+fi
+

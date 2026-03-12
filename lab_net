@@ -1,0 +1,145 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+
+###############################################################################
+#Usage:# Create new network with the provided domain name.
+#Usage:#
+#Usage:# To make life easier, the domain name will be used as network name.
+#Usage:# Existing networks can be removed by providing the network name.
+#--nat#      Setup the network as NAT network
+#--remove#   Remove the network
+#--yes#      Always 'yes' (removal)
+###############################################################################
+
+# Help text
+_help_show_args="DOMAINNAME"
+
+# Automatic --option-processor to var __option_processor=yes
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+DomainName=$1
+TmpXml=/tmp/$DomainName.$$
+
+RemoveNetwork()
+{
+   if [ "$1" = "default" ]
+   then
+      echo "! [ERROR] Network $1 cannot be removed" >&2
+      return 1
+   fi
+
+   if [ "$__yes" = "yes" ] || \
+      (read -p "Remove (y/n) " Ans ; echo $Ans | grep -qi '^[yj]')
+   then
+      echo "# Removing network $1" >&2
+      virsh net-destroy  --network $1 && virsh net-undefine --network $1
+      return $?
+   fi
+}
+
+for NetName in $(virsh net-list --name)
+do
+   if [ "$NetName" = "$DomainName" ]
+   then
+      if [ "$__remove" = "yes" ]
+      then
+         RemoveNetwork $NetName
+         exit $?
+      else
+         echo "# Network $DomainName already setup"
+         exit 0
+      fi
+   else
+      if virsh net-dumpxml $NetName | grep -q "<domain name='$DomainName'/>"
+      then
+         if [ "$__remove" = "yes" ]
+         then
+            RemoveNetwork $NetName
+            exit $?
+         else
+            echo "# Domain $DomainName already in use by $NetName"
+            exit 1
+         fi
+      fi
+   fi
+done
+
+if [ "$__remove" = "yes" ]
+then
+   echo "! [ERROR] Network $DomainName not found, unable to remove" >&2
+   exit 1
+fi
+
+# Setup new network, limit to 100 networks
+NumberOfNetworks=$(ip a | grep '^[0-9]:' | wc -l)
+if [ "$NumberOfNetworks" = "" ] || [ $NumberOfNetworks -gt 100 ]
+then
+   echo "! [ERROR] Max number of networks reached" >&1
+   exit 1
+fi
+
+InUseVirBrNrs=$(\
+   ip a | \
+   grep ' virbr[0-9][0-9]*$' | sed 's/.* virbr//' | sort -n)
+
+LastIpThirdOctet=$(\
+   ip a | \
+   grep '^  *inet 192[.]168[.][1-9][0-9]*.[1-9][0-9]*/.*virbr[0-9]*$' | \
+   sed -e 's/.* inet 192[.]168[.]//' \
+       -e 's,[.][1-9][0-9]*/.*,,' | sort | tail -1)
+
+if [ "$InUseVirBrNrs" = "" ]
+then
+   VirBr=virbr99
+else
+   Nr=0
+   while [ $Nr -lt 99 ] && echo "$InUseVirBrNrs" | grep -q "^$Nr\$"
+   do
+      Nr=$(($Nr+1))
+   done
+   VirBr=virbr$Nr
+fi
+
+if [ "$LastIpThirdOctet" = "" ]
+then
+   ThirdOctet=232
+else
+   ThirdOctet=$((LastIpThirdOctet+1))
+fi
+
+if [ "$__nat" = "yes" ]
+then
+   Forward="s,^\([[:space:]]*\)\(<forward/>\)\$,"
+   Forward="${Forward}\1<forward mode='nat'>\n"
+   Forward="${Forward}\1\1<nat>\n"
+   Forward="${Forward}\1\1\1<port start='1024' end='65535'/>\n"
+   Forward="${Forward}\1\1</nat>\n"
+   Forward="${Forward}\1</forward>\n"
+   Forward="${Forward}\1<domain name=\"$DomainName\"/>,"
+else
+   Forward="s,<forward/>,<domain name=\"$DomainName\"/>,"
+fi
+
+sed -e "s/name>default</name>$DomainName</" \
+    -e "s/\(bridge name=[\"']\)[^\"']*\([\"']\)/\1$VirBr\2/" \
+    -e "s/192[.]168[.][1-9][0-9]*[.]/192.168.$ThirdOctet./g" \
+    -e "${Forward}" \
+    /usr/share/libvirt/networks/default.xml > $TmpXml
+
+virsh net-define $TmpXml ; rm -f $TmpXml
+virsh net-autostart $DomainName
+virsh net-start $DomainName

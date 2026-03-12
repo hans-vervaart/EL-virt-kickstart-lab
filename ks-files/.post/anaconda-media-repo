@@ -1,0 +1,5 @@
+%post --nochroot
+
+cp /tmp/yum.repos.d/* $ANA_INSTALL_PATH/etc/yum.repos.d/
+
+%end

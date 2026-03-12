@@ -1,0 +1,96 @@
+#!/bin/sh
+#
+# GPLv3 see LICENCE file
+#
+
+SCRIPT_NAME=`ls -l $0 2> /dev/null | grep '[-]>' | awk '{print $NF}' | \
+             sed 's,.*/,,g'`
+
+if [ "$SCRIPT_NAME" = "" ]
+then
+   echo
+   echo "Error: `basename $0` is not a soft link; unable to run"
+   echo
+   exit 0
+fi
+
+if [ "`basename $0`" = "$SCRIPT_NAME" ]
+then
+   echo
+   echo "$SCRIPT_NAME is ment to run a command with sudo by creating"
+   echo "a soft-link to $SCRIPT_NAME the command will be repeated"
+   echo "preceeded with 'sudo'"
+   echo
+else
+   # Get the sudo user
+   SUDO_USER=`ls -l $0 2> /dev/null | grep '[-]>' | awk '{print $3}'`
+   if [ "$SUDO_USER" = "$USER" ]
+   then
+      SUDO_USER=root
+   fi
+
+   # Setup the path
+   CUR_DIR=`pwd`
+   cd `dirname $0`
+   SUDO_WRAPPER_LINK=`pwd`/`basename $0`
+   SUDO_PATH=`pwd | sed 's,/bin$,/sbin,g'`
+   SUDO_PATH=$SUDO_PATH:/sbin:/usr/sbin:/usr/local/sbin:$PATH
+   cd $CUR_DIR
+
+   # Clear SUDO_OPTIONS, no external influence
+   unset SUDO_OPTIONS
+
+   # Retrieve general settings, private first
+   if [ -f $HOME/.$SCRIPT_NAME/$SCRIPT_NAME ]
+   then
+      . $HOME/.$SCRIPT_NAME/$SCRIPT_NAME
+   elif [ -f /etc/$SCRIPT_NAME/$SCRIPT_NAME ]
+   then
+      . /etc/$SCRIPT_NAME/$SCRIPT_NAME
+   fi
+
+   # Retrieve specific settings, private first
+   if [ -f $HOME/.$SCRIPT_NAME/`basename $0` ]
+   then
+      . $HOME/.$SCRIPT_NAME/`basename $0`
+   elif [ -f /etc/$SCRIPT_NAME/`basename $0` ]
+   then
+      . /etc/$SCRIPT_NAME/`basename $0`
+   fi
+
+   # Setup the sudo call
+   SUDO=(sudo ${SUDO_OPTIONS[@]} -u $SUDO_USER)
+
+   if [ "$NO_TTY" != "" ] && ! tty -s
+   then
+      NO_TTY=`echo "$NO_TTY" | tr '[[:upper:]]' '[[:lower:]]'`
+      case "$NO_TTY" in
+         'skip-sudo')
+            unset SUDO
+         ;;
+
+         'fail')
+            exit 1
+         ;;
+      esac
+   fi
+
+   if [ "$EXEC_DIR" != "" ]
+   then
+      exec ${SUDO[@]} $EXEC_DIR/`basename $0` $*
+      exit $?
+   else
+      for D in `echo $SUDO_PATH | tr ':' ' '`
+      do
+         EXEC_WITH_SUDO=$D/`basename $0`
+         if [ -f $EXEC_WITH_SUDO ] && \
+            [ "$EXEC_WITH_SUDO" != "$SUDO_WRAPPER_LINK" ]
+         then
+            exec ${SUDO[@]} $EXEC_WITH_SUDO $*
+            exit $?
+         fi
+      done
+   fi
+   echo "$SCRIPT_NAME is not able to find `basename $0`"
+fi
+

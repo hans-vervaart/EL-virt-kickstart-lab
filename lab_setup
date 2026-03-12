@@ -1,0 +1,195 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+
+# Help text
+_help_show_args="$(cat $0 | grep '^[a-z][a-z_]*[a-z]()' | sed 's/().*//' | \
+                   tr '_\n' '-|' | sed 's/|$//') source"
+RunDir=$(cd $(dirname $0) 2> /dev/null;pwd)
+for InSourceDir in $RunDir $(echo $PATH | tr ':' ' ')
+do
+   if [ -r $InSourceDir/_option_processor ]
+   then
+      . $InSourceDir/_option_processor
+      break
+   fi
+done
+
+DocumentRoot=$(awk '/^DocumentRoot[[:space:]]/{print $2}' \
+                   /etc/httpd/conf/httpd.conf 2> /dev/null | \
+               tail -1 | \
+               sed 's/"//g')
+
+if [ "$DocumentRoot" = "" ]
+then
+   echo "! [ERROR] No DocumentRoot found"
+   exit 1
+elif [ ! -d $DocumentRoot ]
+then
+   echo "! [ERROR} DocumentRoot $DocumentRoot does not exists"
+   exit 1
+fi
+
+ks_files()
+{
+   echo "## $(basename $0) $(echo $FUNCNAME | tr '_' '-') $1"
+   if [ ! -d $1 ]
+   then
+      echo "! [ERROR] $1 is not a directory"
+      exit 1
+   fi
+   
+   if [ "$(basename $1)" = "ks-files" ]
+   then
+      Source=$1
+   elif [ -d $1/ks-files ]
+   then
+      Source=$1/ks-files
+   else
+      echo "! [ERROR] No ks-files dir provided"
+   fi
+   Source=$(echo $Source | sed 's,/*$,,')
+   echo "# Using source directory $Source/"
+   if [ ! -d $DocumentRoot/ks-files ]
+   then
+      echo "# Creating $DocumentRoot/ks-files"
+   else
+      echo "# Updating $DocumentRoot/ks-files"
+   fi 
+   RsyncOpts=('-av')
+   RsyncArgs=("$Source/ $DocumentRoot/ks-files/")
+   if [ "$__delete" = "yes" ]
+   then
+      RsyncOpts[${#RsyncOpts[@]}]='--delete'
+      RsyncOpts[${#RsyncOpts[@]}]='--exclude'
+      RsyncOpts[${#RsyncOpts[@]}]='admin-*'
+      if ! rsync -n ${RsyncOpts[@]} ${RsyncArgs[@]} | \
+           grep '^deleting '
+      then
+         echo "# Nothing to delete"
+      else
+         read -p "Are you sure (y/N) " Sure
+         if ! echo $Sure | grep -qi '^[yj]'
+         then
+            echo "Skipping"
+            exit 1
+         fi
+      fi
+   fi
+   echo '##' "rsync ${RsyncOpts[@]} ${RsyncArgs[@]}"
+   if rsync ${RsyncOpts[@]} ${RsyncArgs[@]}
+   then
+      echo "## chown -R root:root $DocumentRoot/ks-files"
+      chown -R root:root $DocumentRoot/ks-files
+      echo "## chmod 0755 $DocumentRoot/ks-files"
+      chmod 0755 $DocumentRoot/ks-files
+      echo "## restorecon -R $DocumentRoot/ks-files"
+      restorecon -R $DocumentRoot/ks-files
+   fi
+}
+
+admin_user()
+{
+   echo "## $(basename $0) $(echo $FUNCNAME | tr '_' '-') $1"
+   if ! id $1 &> /dev/null
+   then
+      echo "! [ERROR] User $1 not on the system"
+      exit 1
+   fi
+   if [ ! -d $DocumentRoot/ks-files/.post ]
+   then
+      mkdir -p $DocumentRoot/ks-files/.post
+   fi
+   if [ ! -d $DocumentRoot/ks-files/.post ]
+   then
+      echo "! [ERROR] Unable to create $DocumentRoot/ks-files/.post"
+   fi
+   AdminUserFile=ks-files/.post/admin-$1
+   if [ -r $DocumentRoot/$AdminUserFile ]
+   then
+      read -p "! [CHECK] $AdminUserFile already exist, refresh? ([Y]/n) " Answer
+      if echo $Answer | grep -qi '^n'
+      then
+         echo "# [SKIPPED]"
+         exit 0
+      fi
+   fi
+   HomeDir="$(awk -F : "/^$1:/"'{print $6}' /etc/passwd)"
+   PubKeys="$(cat $HomeDir/.ssh/*.pub 2> /dev/null)"
+   if [ ${#PubKeys} -eq 0 ]
+   then
+      su - $1 -c ssh-keygen
+      PubKeys="$(cat $HomeDir/.ssh/*.pub 2> /dev/null)"
+   fi
+   if [ ${#PubKeys} -eq 0 ]
+   then
+      echo "! [ERROR] No $HomeDir/.ssh/"'*.pub'" keys"
+      exit 1
+   fi
+   unset PubKeys
+   for User in $*
+   do
+      UserDir="$(awk -F : "/^$User:/"'{print $6}' /etc/passwd)"
+      PubKeys="$(echo "$PubKeys" ; cat $UserDir/.ssh/*.pub 2> /dev/null)"
+   done
+   if [ "$__sudoers_d" = "yes" ]
+   then
+      unset optGwheel
+      By='-sudoers-d'
+   else
+      optGwheel=(-G wheel)
+      By='-by-wheel'
+   fi
+   (
+      echo "## admin $1@$HOSTNAME"
+      echo
+      echo if useradd -p "'$(awk -F: "/^$1:/"'{print $2}' /etc/shadow)'" \
+                      -c "'$(awk -F: "/^$1:/"'{print $5}' /etc/passwd)'" \
+                      ${optGwheel[@]} $1
+      echo 'then'
+      echo '   umask 0077'
+      echo "   mkdir -p $HomeDir/.ssh"
+      echo "   base64 -d << EOF | gunzip -c > $HomeDir/.ssh/authorized_keys"
+      echo "   ${PubKeys}" | gzip -c | base64
+      echo 'EOF'
+      echo "   chown -R $1:$1 $HomeDir/.ssh"
+      echo "   restorecon -R  $HomeDir/.ssh"
+      if [ "$__sudoers_d" = "yes" ]
+      then
+         echo "   echo $1 'ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/$1"
+         echo "   chmod 600 /etc/sudoers.d/$1"
+         echo "   restorecon -R /etc/sudoers.d/$1"
+      fi
+      echo 'fi'
+   ) > ${DocumentRoot}/${AdminUserFile}${By}
+   if [ -s ${DocumentRoot}/${AdminUserFile}${By} ]
+   then
+      chown root:root ${DocumentRoot}/${AdminUserFile}${By}
+      chmod 644       ${DocumentRoot}/${AdminUserFile}${By}
+      restorecon      ${DocumentRoot}/${AdminUserFile}${By}
+      echo "## ${AdminUserFile}${By} created"
+   fi
+}
+
+SubCmd=$(echo "$1" | tr '-' '_')
+
+if ! set | grep -q "^$SubCmd () \$"
+then
+   $0 --help
+   exit 1
+fi
+
+if [ $(id -u) -ne 0 ]
+then
+   sudo $0 $*
+   exit $?
+fi
+
+shift
+$SubCmd $*

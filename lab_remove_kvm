@@ -1,0 +1,72 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+# Remove a (k)vm including all the disks
+#
+
+_help_show_args="kvm-name"
+. `dirname $0`/_option_processor 2> /dev/null
+
+if ! virsh domstate "$1" &> /dev/null
+then
+   echo "! [ERROR] KVM $1 not found"
+   exit 1
+fi
+
+if virsh domstate "$1" 2> /dev/null | grep -qi '^running$'
+then
+   if [ "$__force" != "yes" ]
+   then
+      read -p "Force shutdown $1? (yes/NO) " Confirm
+      if ! echo $Confirm | grep -qi '^yes$'
+      then
+         exit 1
+      fi
+   fi
+   if ! virsh destroy "$1"
+   then
+      exit $?
+   fi
+fi
+
+if virsh domstate "$1" 2> /dev/null | grep -qi '^shut off$'
+then
+   if [ "$__force" != "yes" ]
+   then
+      read -p "Remove $1, including storage? (yes/NO) " Confirm
+      if ! echo $Confirm | grep -qi '^yes$'
+      then
+         exit 1
+      fi
+   fi
+   StorageFiles="$(virsh dumpxml "$1" | \
+                   awk -r "/<disk type='{0,1}file'{0,1}[[:space:]]{1,}device='{0,1}disk'{0,1}>/,/<\/disk>/"'{print $0}' | \
+                   egrep ".*<source[[:space:]]{1,}file='{0,1}" | \
+                    sed -e 's/.*file *='"'"'//' -e "s/'"'.*//')"
+
+   if [ "$___debug" = "yes" ]
+   then
+      for F in $StorageFiles
+      do
+         echo "## $F"
+      done
+      echo '#' virsh undefine --remove-all-storage $1
+   fi
+   virsh undefine --remove-all-storage --snapshots-metadata $1
+
+   # Check for storagae file left behind
+   for F in $StorageFiles
+   do
+      if [ -f $F ]
+      then
+         echo "# rm -f $F"
+         rm -f $F
+      fi
+   done
+fi

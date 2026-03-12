@@ -1,0 +1,46 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+
+# Help text
+_help_show_args=""
+
+# Automatic --option-processor to var __option_processor=yes
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+# Insource Shared code from lab_ks
+eval "$(awk '/^## Shared code$/,/^## End$/{print $0}' $(dirname $0)/lab_ks)"
+
+# Find the run user
+SetUser
+
+echo "# Updating web-mounts"
+for InSource in /etc/lab_ks $(dirname $0)/.lab_ks $Home/.lab_ks
+do
+   if [ -f $InSource ]
+   then
+      . $InSource
+   fi
+done
+
+if [ "$__umount" = "yes" ]
+then
+   UnMount="umount"
+else
+   unset UnMount
+fi
+
+WebMounts $UnMount

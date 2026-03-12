@@ -1,0 +1,6 @@
+# Import RPM GPG keys
+for GpgFile in $(ls /etc/pki/rpm-gpg/ 2> /dev/null)
+do
+   rpm --import /etc/pki/rpm-gpg/$GpgFile
+done
+

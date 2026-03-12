@@ -1,0 +1,150 @@
+#
+# Source this in to get an automatic option processor
+# including long options
+#
+# GPLv3 see LICENCE file
+#
+
+#
+# The --help and -h will show an automaticaly created help output,
+# the Usage: provides the command line. Available options are listed under
+# the Options: line.
+#
+# The next variable is used in the help and the number of words before the
+# ' [' or ' .' is counted to be the number of minimum arguments to be
+# passed as an argument
+#
+# 1 argument:
+# _help_show_args="arg1"
+# _help_show_args="arg1 .."
+# _help_show_args="arg1 [arg2]"
+# _help_show_args="arg1 [arg2] .."
+#
+# 2 arguments:
+# _help_show_args="arg1 arg2 [arg3] .."
+# _help_show_args="arg1 arg2 .."
+#
+
+# Automatic --option-processor to var __option_processor=yes
+#  and      -o                 to var _o=yes
+# Only lowercase and numbers starting with --
+#    and lowercase, uppercase and numbers staring with -
+# if __option_processor_ARG is defined as an empty string like:
+# __option_processor_ARG=""
+#  and
+# _o_ARG=""
+# The passed argument will be put into the __option_processor_ARG or
+# _o_ARG variable.
+#
+# By adding #<marker># lines in the script, paragraphs will be added to
+# the help ouput. Examples:
+#
+#Usage:# This help text will be added in a paragraph under
+#Usage:# the 'Usage:' line.
+#
+#-o#          This will be the help paragraph of the '-o' option.
+#--option#    This is the help paragraph of the '--option' option.
+#--format#  # Will have more indent in the '--format' help paragraph.
+#--format# ## Will have even more indent in second '--format' help line.
+#
+# Only options which are in use in the script will show up in the help,
+# options which are only #<marker># defined, will be ignored.
+#
+# For options in insource files, place the filenames in the _help_source_in
+# variable. Then they will appear in the help and the iarguments for the 
+# options with _ARG will also be processed.
+#
+while echo $1 | grep '^[-][-][a-z0-9-][a-z0-9-]*$'  > /dev/null 2>&1 || \
+      echo $1 | grep '^[-][a-zA-Z0-9][a-zA-Z0-9]*$' > /dev/null 2>&1
+do
+   if echo $1 | grep '^[-][-]' > /dev/null 2>&1
+   then
+      # --long-style-options
+      __Opts=`echo "$1" | sed -e 's,-*$,,g' -e 's,-,_,g'`
+   else
+      # -s -h -ort -Style (short style options)
+      __Opts=`echo "$1" | sed -e 's,^-,,' -e 's,\(.\),_\1 ,g'`
+   fi
+   shift
+   for __Opt in $__Opts
+   do
+      if eval echo "\$$__Opt" | grep '^$' > /dev/null 2>&1
+      then
+         unset ${__Opt}_ARG
+      fi
+      if [ $# -gt 0 ] && \
+         cat $0 $_help_source_in | tr '$' '\n' | sed 's/$/#/' | \
+         grep -E "^[{]{0,1}${__Opt}_ARG[^A-Za-z_]" > /dev/null 2>&1
+      then
+         eval ${__Opt}_ARG[$\{#${__Opt}_ARG[@]\}]=\"$1\"
+         shift
+      fi
+      eval $__Opt='yes'
+   done
+done
+
+unset __Opts __Opt
+
+if [ "$__help" = "yes" ] || [ "$_h" = "yes" ] || \
+   [ $# -lt `echo "$_help_show_args" | sed -e 's/[.[][^][]*[].]//g' \
+                                           -e 's/[[][^][]*[]]//g' | wc -w` ]
+then
+   if [ "$_h" != "yes" ] && tty -s
+   then
+      More=$((which more 2> /dev/null | grep '^/' ; echo cat) | head -1)
+   else
+      More=cat
+   fi
+   (
+      if cat $0 $_help_source_in | tr '$' '\n' | grep -v '^_help_s[ho][ou]' | \
+         grep -E '^[{]{0,1}_[a-zA-Z0-9]|^[{]{0,1}__[a-z0-9]' > /dev/null 2>&1
+      then
+         _help_show_options="[options] "
+      else
+         unset _help_show_options
+      fi
+      echo
+      echo "   Usage: `basename $0` ${_help_show_options}${_help_show_args}"
+      echo
+      if [ "$_h" != "yes" ] && grep '^#Usage:#' $0 > /dev/null 2>&1
+      then
+         cat $0 $_help_source_in | grep '^#Usage:#' | expand | \
+         sed 's|#Usage:# *||' | sed 's|^|     |' | tr '#' ' '
+         echo
+      fi
+      if [ "$_help_show_options" != "" ]
+      then
+         _ArgFilter=`( cat $0 $_help_source_in | tr '$' '\n' | \
+                       grep -v '^_help_s[ho][ou]' | \
+                       grep -E '^[{]{0,1}_[a-zA-Z0-9]|^[{]{0,1}__[a-z0-9]' | \
+                       sed -e 's/^{//' -e 's/_ARG[^A-Za-z_].*/_ARG/' | \
+                       grep '_ARG$' | sed 's/_ARG$//' | sort | uniq | \
+                       tr '\n' '|' ; echo ) | \
+                     sed -e 's/|$//' -e 's/^/^/' -e 's/$/\$/' -e 's/|/\$|^/g'`
+         echo "   Options:"
+         echo
+         cat $0 $_help_source_in | tr '$' '\n' | grep -v '^_help_s[ho][ou]' | \
+         grep -E -v '^[{]{0,1}___' | sed -e 's/^{//' -e 's/$/:/' | \
+         grep -E '^__[a-z0-9][a-z0-9_]*|^_[a-zA-Z0-9][^a-zA-Z0-9]' | \
+         sed -e 's/^\(_[a-zA-Z0-9_]*\).*/\1/g' | \
+         grep -E -v "$_ArgFilter" | sed -e 's/_/-/g' | sort | uniq | \
+         sed -e 's/[-]ARG$/#<value>/' | tr '#' '\t' | expand -t 29 | \
+         while read OptHelp
+         do
+            echo "      $OptHelp"
+            Option="$(echo $OptHelp | awk '{print $1}')"
+            if [ "$_h" != "yes" ] && \
+               cat $0 $_help_source_in | grep "^#${Option}#" > /dev/null 2>&1
+            then
+               echo
+               cat $0 $_help_source_in | grep "^#${Option}#" | expand | \
+               sed "s|^#${Option}# *||" | sed 's|^|        |' | tr '#' ' '
+               echo
+            fi
+         done
+         echo
+      fi
+   ) | $More
+   exit 0
+fi
+

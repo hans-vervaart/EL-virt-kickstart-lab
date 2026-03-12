@@ -1,0 +1,154 @@
+# vim:tabstop=3:expandtab:shiftwidth=3
+
+# Create the /etc/yum.repos.d/install-media.repo from the ks file
+# If installed from a URL create the repo in disabled mode
+#
+# DVD install mounts:
+#
+# iso9660 mount on /mnt/source in RH65 RH610
+# iso9660 mount on /run/install/repo in RH76
+# iso9660 mount on /run/install/repo in CO81 RH8[012345]
+# iso9660 mount also on /run/install/sources/mount-0000-cdrom in RH8[345]
+#
+# In the ISO root the file media.repo with info
+#
+
+# This will get the vars from the kickstart in
+LAB_KS_VARS=yes
+
+cat << EOF > /root/install-media-repo.sh
+#!/bin/bash
+
+# Place the DVD web mount
+$(echo ISO_MNT=$ISO_MNT | grep -v '=$')
+$(echo ISO_URL=$ISO_URL | grep -v '=$')
+
+if which wget &> /dev/null
+then
+   GURL=wget
+   GURL_OPTIONS=(-t 1 --connect-timeout=1 -qO -)
+elif which curl &> /dev/null
+then
+   GURL=curl
+   GURL_OPTIONS=(--connect-timeout 1)
+fi
+
+KS_URL=\`grep '^url[[:space:]]--url[[:space:]=]"*http' \\
+        /root/anaconda-ks.cfg 2> /dev/null | \\
+        sed -e 's/.*--url[[:space:]=]"*//' -e 's/"$//' -e 's,/*$,/,'\`
+
+if [ "\$KS_URL" = "" ] && [ "\$ISO_URL" != "" ]
+then
+   KS_URL=\`echo \$ISO_URL | sed 's,/*$,/,'\`
+fi
+
+if [ "\$KS_URL" != "" ]
+then
+   DIRS=\`\$GURL \${GURL_OPTIONS[@]} \$KS_URL 2> /dev/null | \\
+         sed -e 's/.*href=//g' -e 's/<.*//' -e 's,>,,' -e 's/\"/ /g' | \\
+         awk '{if ((\$1==\$2)&&(\$1!="")) {print \$1}}' | grep '/$' | \\
+         sed 's,/$,,'| sort\`
+
+   (
+      if echo \$DIRS | grep -w 'repodata' &> /dev/null
+      then
+         echo "[install-media]"
+         echo "name=\\"Install media\\""
+         echo "baseurl=\${KS_URL}"
+         echo "#proxy=_none_"
+         echo "enabled=1"
+         echo "gpgcheck=0"
+         echo
+      else
+         for DIR in \$DIRS
+         do
+            if \$GURL \${GURL_OPTIONS[@]} \$KS_URL/\$DIR/repodata \\
+               2> /dev/null |  grep -qw repodata
+            then
+               echo "[install-media-\$DIR]"
+               echo "name=\\"Install media \$DIR\\""
+               echo "baseurl=\${KS_URL}/\${DIR}/"
+               echo "enabled=1"
+               echo "gpgcheck=0"
+               echo
+            fi
+         done
+      fi
+   ) | sed 's,\([^:]/\)/*,\1,g' > /etc/yum.repos.d/install-media.repo
+fi
+
+# If we have 
+if grep '^repo ' /root/anaconda-ks.cfg &> /dev/null
+then
+   grep '^repo ' /root/anaconda-ks.cfg | uniq | \\
+   while read REPO
+   do
+      eval \`echo \$REPO | sed -e 's/^repo//' -e 's/ --/;/g' \\
+                             -e 's/ ;/;/g' -e 's/^;//'\`
+
+      if [ "\$ISO_MNT" != "" ] && [ "\$KS_URL" != "" ] && \\
+         echo \$baseurl | grep -q "^\$ISO_MNT"
+      then
+         baseurl=\$(echo \$baseurl | sed "s,^\$ISO_MNT,\$KS_URL,")
+      fi
+
+      if [ "\$Count" = "" ]
+      then
+         Count=1
+         echo "[install-repo]"
+      else
+         Count=\`expr \$Count + 1\`
+         echo "[install-repo\$Count]"
+      fi
+      echo "name=\\"\$name\\""
+      echo "baseurl=\\"\$baseurl\\""
+      echo "gpgcheck=0"
+      echo
+   done >> /etc/yum.repos.d/install-media.repo
+fi
+EOF
+chmod u+x /root/install-media-repo.sh
+
+if [ -f /root/anaconda-ks.cfg ]
+then
+   /root/install-media-repo.sh
+else
+   # Run the script at first-boot
+   cat << EOF >> /etc/rc.d/rc.local
+## FirstBoot Start
+
+# Place the DVD web mount
+$(echo ISO_MNT=$ISO_MNT | grep -v '=$')
+$(echo ISO_URL=$ISO_URL | grep -v '=$')
+
+# Run the install-media-repo if we don't have anaconda.repo
+
+if [ ! -f /etc/yum.repos.d/anaconda.repo ]
+then
+   /root/install-media-repo.sh &> /dev/null
+else
+   # Disable gpgcheck for the pre-installed repo files
+   for RepoFile in \$(grep -lR '^enabled=1' /etc/yum.repos.d/*.repo)
+   do
+      sed -e '/^gpgcheck=/d' -e 's/^enabled=1/gpgcheck=0\n\0/' \\
+          -i \$RepoFile
+   done
+   if [ "\$ISO_MNT" != "" ] && [ "\$ISO_URL" != "" ]
+   then
+      # Correct the pre-installed repo files pointing to the iso mount
+      for RepoFile in \$(grep -lR "\$ISO_MNT" /etc/yum.repos.d/*.repo)
+      do
+         sed "s,\$ISO_MNT,\$ISO_URL,g" \\
+             -i \$RepoFile
+      done
+   fi
+fi
+
+# Remove the FirstBoot block
+Me=/etc/rc.d/rc.local
+sed -i '/## FirstBoot Start/,/## FirstBoot End\n/d' \$Me ; chmod -x \$Me
+## FirstBoot End
+EOF
+   chmod +x /etc/rc.d/rc.local
+fi
+

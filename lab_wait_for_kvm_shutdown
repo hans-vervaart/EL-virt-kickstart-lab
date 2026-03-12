@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+# -----------------------------------------------------------------------------
+#
+#Usage:# Wait for the (K)VMs to shutdown
+#Usage:#
+#Usage:# This little tool can be usefull when setting up a script to build
+#Usage:# your lab with multiple VMs automatically
+#
+#--intention#   Why the script is waiting for the startup (waiting message)
+#--max-minutes# The maximum wait time in minutes
+#
+# -----------------------------------------------------------------------------
+
+# Help text
+_help_show_args="VmName [VmName] ..."
+
+# Options
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+if [ "$__intention" = "" ]
+then
+   __intention_ARG="$(echo "$0" | sed 's/.*_//')"
+fi
+
+ShowTime() # $1
+{
+   if echo "$1" | grep -q '^[0-9][0-9]*$'
+   then
+      if [ $1 -lt 3600 ]
+      then
+         # Minutes and seconds
+         printf "%02u:%02u" \
+                   "$((($1/60)%60))" "$(($1%60))"
+      else
+         # Add the hours counter
+         printf "%02u:%02u:%02u" \
+                   "$(($1/(60*60)))" "$((($1/60)%60))" "$(($1%60))"
+      fi
+   fi
+}
+
+if ! echo "$__max_minutes_ARG" | grep -q '^[0-9][0-9]*$' ||
+   [ $__max_minutes_ARG -le 0 ]   
+then
+   # OK wait for a day max
+   __max_minutes_ARG=$((24*60))
+fi
+
+if [ $__max_minutes_ARG -ge 60 ]
+then
+   MaxMin="$(printf "Max %02u:%02u:00" "$(($__max_minutes_ARG/60))" \
+                                       "$(($__max_minutes_ARG%60))")"
+else
+   MaxMin="$(printf "Max %02u:00" "$(($__max_minutes_ARG%60))")"
+fi
+
+Start=$(date +%s)
+MaxTime=$(($Start+$(($__max_minutes_ARG*60))))
+
+EregExpr="$(echo $* | sed -e 's/$/$/' -e 's/ /$|^/g' -e 's/^/^/')"
+RunVms=-1  # get in the loop
+TimeLeft=1 # get in the loop
+while [ $RunVms -ne 0 ] && [ $TimeLeft -gt 0 ]
+do
+   sudo -v ; sleep $(($Step+0)) ; [ $(($Step+0)) -lt 1 ] && Step=1
+   SoFar=$(($(date +%s)-$Start))
+   TimeLeft=$(($MaxTime-$(date +%s)))
+   if [ $TimeLeft -lt 0 ]
+   then
+      TimeLeft=0
+   fi
+   AllVms=$(virsh list --name --all | egrep "$EregExpr" | wc -l)
+   RunVms=$(virsh list --name | egrep "$EregExpr" | wc -l)
+   printf "\rWaiting for %s (%u/%u) %s (%s left)   \r" \
+             "$__intention_ARG" \
+             "$RunVms" "$AllVms" \
+             "$(ShowTime $SoFar)" "$(ShowTime $TimeLeft)"
+done
+echo
+[ $RunVms -eq 0 ] # return the shutdown state

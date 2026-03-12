@@ -1,0 +1,79 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-03-07 01:42:40 +0100 (Sat, 07 Mar 2026) $
+# $Revision: 796 $
+#
+# Helper script to extend an extra disk (or disks) on an existing (k)vm
+#
+
+if [ "$2" = "" ]
+then
+   echo
+   echo "Usage: `basename $0` kvm-name disk:size [disk:size] .."
+   echo
+   exit 1
+fi
+
+ExtendDisk()
+{
+   if ! virsh list --name --all | grep -v '^$' | grep -q "^$1\$"
+   then
+      echo "! VM $1 does not exist"
+      return 1
+   fi
+
+   RootDisk="`virsh domblklist $1 2> /dev/null | \
+              grep '^[[:space:]]' | sed 's/^[[:space:]]*//' | \
+              grep '^[sv]d[a-z][a-z]*[[:space:]][[:space:]]*' | \
+              sort | head -1`"
+   RootDiskDev=`echo "$RootDisk" | awk '{print $1}'`
+   SystemImage=`echo "$RootDisk" | awk '{print $2}' | \
+                sed "s|[.]$RootDiskDev.*||"`
+
+   if [ "$SystemImage" = "" ]
+   then
+      echo "! Unable to determine system's disk image"
+      return 1
+   fi
+
+   ExtendDiskDev=$(echo $2 | awk -F: '{print $1}')
+   ExtendDiskSize=$(echo $2 | awk -F: '{print $2}')
+
+   if [ "$ExtendDiskDev" = "" ] || [ "$ExtendDiskSize" = "" ]
+   then
+      echo
+      echo "! Unrecognized input: $1"
+      echo 
+      exit
+   fi
+
+   ExtendImage=$(virsh domblklist $1 2> /dev/null | \
+                 grep '^[[:space:]]' | sed 's/^[[:space:]]*//' | \
+                 grep '^[sv]d[a-z][a-z]*[[:space:]][[:space:]]*' |
+                 grep -v "^$RootDiskDev[[:space:]]" | \
+                 grep    "^$ExtendDiskDev[[:space:]]" | \
+                 awk '{print $2}')
+
+   Size=$(echo $ExtendDiskSize | sed 's/[0-9]$/\0G/')
+   echo "# Extending disk image $ExtendImage ($Size)"
+   qemu-img resize $ExtendImage $Size
+   if [ $? -eq 0 ]
+   then
+      echo "# Disk image $ExtendImage ($ExtendDiskDev) extended to $Size"
+   else
+      echo
+      echo "! [FAIL] Image not resized."
+      return 1
+   fi
+}
+
+Kvm=$1
+shift
+while [ "$1" != "" ] && ExtendDisk $Kvm $1
+do
+   shift
+done
