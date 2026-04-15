@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# vim:tabstop=3:expandtab:shiftwidth=3
+#
+# GPLv3 see LICENCE file
+#
+# $Date: 2026-04-15 17:29:53 +0200 (Wed, 15 Apr 2026) $
+# $Revision: 820 $
+#
+
+
+# Help text
+_help_show_args=""
+
+# Automatic --option-processor to var __option_processor=yes
+for D in $(cd $(dirname $0) ; pwd) $(echo $PATH | tr ':' ' ')
+do
+   if [ -f $D/_option_processor ]
+   then
+      . $D/_option_processor
+      break
+   fi
+done
+
+if [ $(id -u) -ne 0 ]
+then
+   udo=sudo
+fi
+
+KvmIpRegExpr="$(\
+$udo ls /etc/libvirt/qemu/networks/ | grep '[.]xml$' | \
+while read
+do
+   $udo grep '<ip address=' /etc/libvirt/qemu/networks/$REPLY
+done | \
+awk -F "'" '{print $2}' | sed -e 's|[.][^.]\+$|.[1-9][0-9]*\\s|' | \
+tr '\n' '|' | sed 's,|$,,'
+)"
+
+# Flush dnsmasq first
+$udo killall -HUP dnsmasq
+
+grep -E "$KvmIpRegExpr" /etc/hosts 2> /dev/null | \
+while read
+do
+   Kvm="$(sed -e 's|\s*#.*||' \
+              -e 's|^[^[:space:]]\+\s\+||' <<< "$REPLY" | \
+          tr '[[:space:]]' '\n' | awk -F. '{print $1}' | sort -u)"
+   Ip="$($udo virsh domifaddr "$Kvm" 2> /dev/null | \
+         awk '/\sipv4\s/{print $NF}' | \
+         sed 's|/.*||' | head -1)"
+   if [ ${#Ip} -eq 0 ]
+   then
+      Kvm="$(sed -e 's|\s*#.*||' \
+                 -e 's|^[^[:space:]]\+\s\+||' <<< "$REPLY" | \
+             tr '[[:space:]]' '\n' | grep '[.]' | sort -u | head -1)"
+      Ip="$($udo virsh domifaddr "$Kvm" 2> /dev/null | \
+            awk '/\sipv4\s/{print $NF}' | \
+            sed 's|/.*||' | head -1)"
+   fi
+   if [ ${#Ip} -gt 0 ]
+   then
+      Replace="$Ip $(sed 's|^[^[:space:]]\+\s\+||' <<< "$REPLY")"
+      if [ "$REPLY" != "$Replace" ]
+      then
+         Find="$(sed 's|[.]|[.]|g' <<< "$REPLY")"
+         echo "# KVM $Kvm new IP $Ip in /etc/hosts"
+         $udo sed "s|^${Find}\$|${Replace}|" -i /etc/hosts
+      fi
+   fi
+done

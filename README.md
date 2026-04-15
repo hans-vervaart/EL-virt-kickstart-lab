@@ -28,6 +28,7 @@ lab_add_net               # Add a network to a VM
 lab_extend_disk           # Extend a disk
 lab_net                   # Setup a domain
 lab_remove_kvm            # remove a VM
+lab_update_etc_hosts      # IPs of VM in /etc/hosts will be updated
 lab_wait_for_kvm_shutdown # Helper to wait for VMs to be shutdown
 lab_wait_for_kvm_startup  # Helper to wait for VMs to be started
 lab_webmount              # Mount ISO images for kisckstart
@@ -67,6 +68,7 @@ lab_extend_disk -> /usr/local/bin/sudowrapper
 lab_ks -> /usr/local/bin/sudowrapper
 lab_net -> /usr/local/bin/sudowrapper
 lab_remove_kvm -> /usr/local/bin/sudowrapper
+lab_update_etc_hosts -> /usr/local/bin/sudowrapper
 lab_setup -> /usr/local/bin/sudowrapper
 lab_wait_for_kvm_shutdown
 lab_wait_for_kvm_startup
