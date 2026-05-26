@@ -4,8 +4,8 @@
 #
 # GPLv3 see LICENCE file
 #
-# $Date: 2026-03-07 08:52:12 +0100 (Sat, 07 Mar 2026) $
-# $Revision: 797 $
+# $Date: 2026-05-26 13:39:44 +0200 (Tue, 26 May 2026) $
+# $Revision: 825 $
 #
 # Usage: lab_ks.sh vm-name kickstart-file [[ram-size-in-Mb] [disk-size-in-Gb]]
 # $1 kickstart file name
@@ -157,7 +157,8 @@ WebMounts() # $1 = "umount" -> umount
                mkdir -p /var/www/html/$MountPoint
             fi
 
-            if [ ! -d /var/www/html/$MountPoint/images ]
+            if [ ! -d /var/www/html/$MountPoint/images ] && \
+               [ ! -d /var/www/html/$MountPoint/EFI ]
             then
                echo "# Mounting $IsoFile on /var/www/html/$MountPoint"
                mount -o loop,ro $IsoDir/$IsoFile /var/www/html/$MountPoint/
